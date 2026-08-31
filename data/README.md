@@ -13,7 +13,7 @@ Data folder includes:
     - Modifications
     - Charge
     - Master Protein
-    - # Proteins
+    - /# Proteins
     - PSM Ambiguity
     - Quan Value
     - q-Value
