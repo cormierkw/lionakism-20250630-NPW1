@@ -1,0 +1,79 @@
+.quarto-title-block .quarto-title-banner {
+  background-image: url(RTB_Wheel.png);
+  background-size: 300px;
+  background-position: left;
+  background-repeat: no-repeat;
+  padding-left: 10px;
+  background-origin: content-box;
+}
+
+
+#quarto-document-content {
+  width: 1200px;
+}
+
+.main-container {
+  max-width: 100% !important;
+  margin: auto;
+}
+.fixed-height150 .tab-content {
+  height: 150em;
+}
+.fixed-height100 .tab-content {
+  height: 100em;
+}
+.fixed-height50 .tab-content {
+  height: 50em;
+}
+.fixed-height70 .tab-content {
+  height: 70em;
+}
+
+/* Static volcano figures should expand the page, never create a nested scroller. */
+.volcano-tabset .tab-content,
+.volcano-tabset .tab-pane {
+  height: auto !important;
+  min-height: 70rem;
+  max-height: none !important;
+  overflow: visible !important;
+}
+
+.volcano-tabset figure,
+.volcano-tabset img {
+  max-width: 100%;
+  height: auto;
+}
+
+.section h1 {
+color: #0F9434;
+}
+
+.section h2 {
+color: #1072A5;
+}
+
+.section h3 {
+color: #8D10A5
+}
+
+.title {
+margin-top: 1em !important;
+text-align: center;
+color: #D63A18;
+}
+
+
+.subtitle {
+margin-bottom: 0.75em;
+text-align: center;
+color: #1A7E06;
+}
+
+.author {
+text-align: center;
+font-size: 25px;
+}
+
+.date {
+text-align: center;
+}

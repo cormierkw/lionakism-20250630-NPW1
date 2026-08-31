@@ -1,0 +1,5 @@
+Comparison,input_proteins,unique_accessions,mapped_accessions,ranked_entrez_ids,tested_terms,returned_terms,dotplot_status,treeplot_status,status
+FC vs Healthy,4357,4357,4200,4243,24547,349,Generated,Generated,349 enriched GO BP terms returned.
+LC vs Healthy,4352,4352,4196,4239,24547,340,Generated,Generated,340 enriched GO BP terms returned.
+LC vs FC,4904,4904,4740,4786,24547,233,Generated,Generated,233 enriched GO BP terms returned.
+Infected vs Healthy,4350,4350,4194,4237,24547,356,Generated,Generated,356 enriched GO BP terms returned.

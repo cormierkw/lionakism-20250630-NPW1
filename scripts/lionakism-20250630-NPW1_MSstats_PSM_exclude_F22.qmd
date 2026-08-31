@@ -1,0 +1,2006 @@
+---
+title: "MSstats PSM-Level Proteomics Analysis"
+lightbox: true
+subtitle: "lionakism-20250630-NPW1 example dataset excluding sample F22"
+author:
+  - Kevin Cormier
+date: "`r Sys.Date()`"
+title-block-banner: "#27445C"
+format:
+  html:
+    toc: true
+    toc-location: left
+    toc-active-border: red
+    page-layout: full
+    theme:
+      light: cosmo
+      dark: darkly
+    html-math-method: katex
+    code-fold: true
+    highlight-style: tango
+    toc_float: true
+    number-sections: false
+    embed-resources: true
+    smooth-scroll: true
+    fig-align: 'center'
+    fig-width: 10
+    fig-height: 10
+css: style.css
+editor: source
+execute:
+  cache: false
+editor_options:
+  chunk_output_type: console
+params:
+  request: "lionakism-20250630-NPW1-exclude-F22"
+  psm_file: "../data/lionakism-20250630_PSM.xlsx"
+  annotation_file: "../data/lionakism-20250630_Annotation.xlsx"
+  output_dir: "../results/lionakism-20250630-NPW1-exclude-F22"
+  max_psm_rows: null
+  excluded_runs:
+    - "F22"
+  filter_confidence: "High"
+  remove_contaminants: true
+  remove_shared_peptides: true
+  remove_single_peptide_proteins: false
+  remove_few_measurements: false
+  normalization: "equalizeMedians"
+  summary_method: "TMP"
+  mb_impute: true
+  number_of_cores: 1
+  volcano_p_cutoff: 0.05
+  volcano_fc_cutoff: 1
+  volcano_top_labels: 10
+  volcano_split_axis_quantile: 0.95
+  volcano_split_axis_min_ratio: 1.8
+  volcano_split_axis_scales: 0.35
+  qc_max_features: 5000
+  qc_top_cv_proteins: 25
+  power_alpha: 0.05
+  power_target: 0.8
+  power_effect_log2fc: 1
+  power_top_rows: 200
+  gsea_pvalue_cutoff: 0.05
+  gsea_min_gene_set_size: 100
+  gsea_max_gene_set_size: 500
+  gsea_dot_show_categories: 10
+  gsea_tree_show_categories: 20
+  gsea_tree_label_wrap: 40
+---
+
+```{r, include=FALSE}
+if (.Platform$OS.type == "windows") {
+  options(download.file.method = "wininet")
+}
+
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE,
+                      cache = FALSE, fig.align = 'center',
+                      fig.width = 10, fig.height = 10,
+                      comment = NA)
+```
+
+```{r setup}
+required_packages <- c(
+  "MSstats",
+  "readxl",
+  "dplyr",
+  "tidyr",
+  "stringr",
+  "purrr",
+  "ggplot2",
+  "ggrepel",
+  "scales",
+  "EnhancedVolcano",
+  "ggbreak",
+  "readr",
+  "DT",
+  "knitr",
+  "tibble",
+  "clusterProfiler",
+  "AnnotationDbi",
+  "org.Hs.eg.db",
+  "enrichplot",
+  "htmltools"
+)
+
+missing_packages <- required_packages[!vapply(required_packages, requireNamespace, logical(1), quietly = TRUE)]
+if (length(missing_packages) > 0) {
+  stop("Install required package(s): ", paste(missing_packages, collapse = ", "), call. = FALSE)
+}
+
+suppressPackageStartupMessages({
+  library(MSstats)
+  library(readxl)
+  library(dplyr)
+  library(tidyr)
+  library(stringr)
+  library(purrr)
+  library(ggplot2)
+  library(EnhancedVolcano)
+  library(ggbreak)
+  library(readr)
+  library(DT)
+  library(knitr)
+  library(tibble)
+})
+
+current_input <- tryCatch(knitr::current_input(), error = function(e) NULL)
+report_dir <- if (!is.null(current_input) && nzchar(current_input)) {
+  dirname(normalizePath(current_input, winslash = "/", mustWork = TRUE))
+} else {
+  normalizePath(getwd(), winslash = "/", mustWork = TRUE)
+}
+
+psm_file <- normalizePath(file.path(params$psm_file), winslash = "/", mustWork = TRUE)
+annotation_file <- normalizePath(file.path(report_dir, params$annotation_file), winslash = "/", mustWork = TRUE)
+output_dir <- file.path(report_dir, params$output_dir)
+dir.create(output_dir, recursive = TRUE, showWarnings = FALSE)
+read_psm_n_max <- if (is.null(params$max_psm_rows)) Inf else params$max_psm_rows
+source(file.path(report_dir, "pathway-analysis-functions.R"), local = knitr::knit_global())
+source(file.path(report_dir, "qc-helper-functions.R"), local = knitr::knit_global())
+
+figure_dir <- file.path(report_dir, "..", "figures")
+dir.create(figure_dir, recursive = TRUE, showWarnings = FALSE)
+knitr::opts_chunk$set(
+  fig.path = paste0("../figures/", params$request, "-"),
+  dev = c("png", "pdf"),
+  dpi = 150
+)
+
+set.seed(20250707)
+```
+
+## Methods
+
+The Protein Spectral Match (PSM-level) reporter-ion intensities were imported from the Proteome Discoverer
+export and linked to experimental condition, biological replicate, and raw-file
+metadata. The F22 run and its annotation record were excluded before quality control and statistical modeling. Quantitative
+rows with missing or non-positive abundance were removed; when available, only
+`r params$filter_confidence`-confidence PSMs were retained andcontaminant-flagged rows were excluded. Peptides shared among proteins were
+removed during conversion to MSstats, while proteins represented by a single
+peptide were retained.
+
+Proteome Discoverer fields were converted with
+`MSstats::PDtoMSstatsFormat()`, resolving duplicate feature measurements by
+their maximum intensity. Intensities were log2 transformed, normalized by
+`r params$normalization`, summarized from peptide features to proteins with the
+`r params$summary_method` method, and missing values were handled using
+MSstats model-based imputation. Quality assessment included run-level feature
+counts and intensity distributions, missingness, coefficients of variation,
+Pearson correlations, and principal component analysis.
+
+Protein-level linear models tested FC versus Healthy, LC versus Healthy, and LC
+versus FC. The Infected-versus-Healthy contrast represented the equally
+weighted mean of FC and LC minus Healthy. MSstats supplied log2 fold changes,
+standard errors, test statistics, degrees of freedom, raw p-values, and
+Benjamini-Hochberg adjusted p-values. Differential expression was defined as
+an adjusted p-value below `r params$volcano_p_cutoff` and an absolute log2 fold
+change of at least `r params$volcano_fc_cutoff`.
+
+For GO Biological Process gene set enrichment analysis (GSEA), UniProt protein
+accessions were mapped to Entrez identifiers and ranked by signed statistical
+evidence. Gene sets containing `r params$gsea_min_gene_set_size` to `r params$gsea_max_gene_set_size` 
+genes were tested with clusterProfiler; results
+were interpreted using Benjamini-Hochberg adjusted p-values and summarized in
+dot plots, similarity tree plots, and result tables. Power diagnostics used a
+two-sided alpha of `r params$power_alpha`, target power of `r params$power_target`, and target absolute effect of `r params$power_effect_log2fc` log2 units.
+
+
+```{r load-data}
+psm_raw <- readxl::read_excel(
+  psm_file,
+  sheet = "PSMs",
+  .name_repair = "minimal",
+  n_max = read_psm_n_max
+)
+
+annotation_raw <- readxl::read_excel(annotation_file, .name_repair = "minimal")
+
+required_psm_cols <- c(
+  "File ID",
+  "Annotated Sequence",
+  "Charge",
+  "Master Protein Accessions",
+  "Quan Value"
+)
+required_annotation_cols <- c("File Name", "File ID", "Condition", "BioReplicate")
+
+missing_psm_cols <- setdiff(required_psm_cols, names(psm_raw))
+missing_annotation_cols <- setdiff(required_annotation_cols, names(annotation_raw))
+if (length(missing_psm_cols) > 0) {
+  stop("Missing required PSM column(s): ", paste(missing_psm_cols, collapse = "; "), call. = FALSE)
+}
+if (length(missing_annotation_cols) > 0) {
+  stop("Missing required annotation column(s): ", paste(missing_annotation_cols, collapse = "; "), call. = FALSE)
+}
+
+psm <- psm_raw |>
+  rename(SpectrumFile = `File ID`) |>
+  mutate(
+    SpectrumFile = as.character(SpectrumFile),
+    `Quan Value` = suppressWarnings(as.numeric(`Quan Value`))
+  )
+
+annotation <- annotation_raw |>
+  rename(Run = `File ID`) |>
+  mutate(
+    Run = as.character(Run),
+    Condition = as.character(Condition),
+    BioReplicate = as.character(BioReplicate),
+    SampleName = tools::file_path_sans_ext(basename(as.character(`File Name`))),
+    FigureLabel = .data$SampleName
+  )
+
+excluded_runs <- as.character(params$excluded_runs)
+excluded_runs <- excluded_runs[!is.na(excluded_runs) & nzchar(excluded_runs)]
+if (length(excluded_runs) > 0) {
+  missing_excluded_runs <- setdiff(excluded_runs, annotation$Run)
+  if (length(missing_excluded_runs) > 0) {
+    warning("Excluded run(s) were not found in annotation: ",
+            paste(missing_excluded_runs, collapse = ", "))
+  }
+
+  psm <- psm |>
+    filter(!.data$SpectrumFile %in% excluded_runs)
+  annotation <- annotation |>
+    filter(!.data$Run %in% excluded_runs)
+}
+
+missing_runs <- setdiff(unique(psm$SpectrumFile), annotation$Run)
+if (length(missing_runs) > 0) {
+  stop("Missing annotation for run(s): ", paste(missing_runs, collapse = ", "), call. = FALSE)
+}
+```
+
+```{r qc-helper-functions}
+as_plain_tibble <- function(x) {
+  tibble::as_tibble(as.data.frame(x))
+}
+
+first_existing_col <- function(data, candidates) {
+  found <- intersect(candidates, names(data))
+  if (length(found) == 0) NULL else found[[1]]
+}
+
+is_truthy_flag <- function(x) {
+  if (is.logical(x)) return(!is.na(x) & x)
+  vals <- tolower(trimws(as.character(x)))
+  !is.na(vals) & vals %in% c("true", "t", "yes", "y", "1", "+")
+}
+
+has_modification <- function(x) {
+  vals <- tolower(trimws(as.character(x)))
+  !is.na(vals) & nzchar(vals) &
+    !vals %in% c("none", "unmodified", "no modifications", "na")
+}
+
+add_psm_feature_id <- function(data) {
+  data |>
+    mutate(
+      .qc_feature_id = paste(
+        .data$`Master Protein Accessions`,
+        .data$`Annotated Sequence`,
+        .data$Charge,
+        sep = " | "
+      )
+    )
+}
+
+coerce_log2_intensity <- function(x, value_col) {
+  vals <- suppressWarnings(as.numeric(x))
+  finite_vals <- vals[is.finite(vals)]
+  if (length(finite_vals) == 0) return(vals)
+
+  looks_linear <- grepl("^Intensity$|Quan Value", value_col, ignore.case = TRUE) ||
+    stats::median(finite_vals, na.rm = TRUE) > 100
+
+  if (looks_linear) {
+    log2(pmax(vals, .Machine$double.xmin))
+  } else {
+    vals
+  }
+}
+
+impute_matrix_by_row_mean <- function(mat) {
+  if (nrow(mat) == 0 || ncol(mat) == 0) return(mat)
+
+  keep <- rowSums(is.finite(mat)) >= 2
+  mat <- mat[keep, , drop = FALSE]
+  if (nrow(mat) == 0) return(mat)
+
+  row_means <- rowMeans(mat, na.rm = TRUE)
+  for (i in seq_len(nrow(mat))) {
+    mat[i, !is.finite(mat[i, ])] <- row_means[[i]]
+  }
+
+  row_vars <- apply(mat, 1, stats::var, na.rm = TRUE)
+  mat[is.finite(row_vars) & row_vars > 0, , drop = FALSE]
+}
+
+make_feature_run_matrix <- function(data, feature_col, run_col, value_col,
+                                    max_features = params$qc_max_features) {
+  matrix_data <- data |>
+    mutate(
+      .qc_feature = as.character(.data[[feature_col]]),
+      .qc_run = as.character(.data[[run_col]]),
+      .qc_log2 = coerce_log2_intensity(.data[[value_col]], value_col)
+    ) |>
+    filter(!is.na(.data$.qc_feature), nzchar(.data$.qc_feature),
+           !is.na(.data$.qc_run), nzchar(.data$.qc_run),
+           is.finite(.data$.qc_log2)) |>
+    group_by(.data$.qc_feature, .data$.qc_run) |>
+    summarise(log2Intensity = mean(.data$.qc_log2, na.rm = TRUE),
+              .groups = "drop")
+
+  if (nrow(matrix_data) == 0) return(matrix(numeric(), nrow = 0, ncol = 0))
+
+  selected_features <- matrix_data |>
+    group_by(.data$.qc_feature) |>
+    summarise(
+      n_runs = n_distinct(.data$.qc_run),
+      variance = stats::var(.data$log2Intensity, na.rm = TRUE),
+      .groups = "drop"
+    ) |>
+    mutate(variance = if_else(is.finite(.data$variance), .data$variance, 0)) |>
+    arrange(desc(.data$n_runs), desc(.data$variance)) |>
+    slice_head(n = max_features) |>
+    pull(.data$.qc_feature)
+
+  wide <- matrix_data |>
+    filter(.data$.qc_feature %in% selected_features) |>
+    tidyr::pivot_wider(
+      names_from = ".qc_run",
+      values_from = "log2Intensity"
+    )
+
+  mat <- wide |>
+    tibble::column_to_rownames(".qc_feature") |>
+    as.matrix()
+  storage.mode(mat) <- "numeric"
+  mat
+}
+
+plot_correlation_heatmap <- function(feature_matrix, sample_annotation, title) {
+  if (ncol(feature_matrix) < 2 || nrow(feature_matrix) < 2) {
+    message("Correlation heatmap skipped: not enough quantified features or runs.")
+    return(invisible(NULL))
+  }
+
+  mat <- impute_matrix_by_row_mean(feature_matrix)
+  if (ncol(mat) < 2 || nrow(mat) < 2) {
+    message("Correlation heatmap skipped: not enough complete features after imputation.")
+    return(invisible(NULL))
+  }
+
+  corr <- stats::cor(mat, use = "pairwise.complete.obs")
+  corr_df <- as.data.frame(as.table(corr), stringsAsFactors = FALSE)
+  names(corr_df) <- c("Run1", "Run2", "Correlation")
+
+  correlation_annotation <- sample_annotation |>
+    mutate(
+      CorrelationLabel = if_else(
+        !is.na(.data$Condition) & nzchar(.data$Condition) &
+          !is.na(.data$BioReplicate) & nzchar(as.character(.data$BioReplicate)),
+        paste0(.data$Condition, "_", .data$BioReplicate),
+        coalesce(.data$FigureLabel, .data$Run)
+      )
+    )
+  label_lookup <- stats::setNames(
+    correlation_annotation$CorrelationLabel,
+    correlation_annotation$Run
+  )
+  display_levels <- unname(label_lookup[colnames(mat)])
+  display_levels[is.na(display_levels)] <- colnames(mat)[is.na(display_levels)]
+  corr_df <- corr_df |>
+    mutate(
+      Sample1 = coalesce(unname(label_lookup[as.character(.data$Run1)]), as.character(.data$Run1)),
+      Sample2 = coalesce(unname(label_lookup[as.character(.data$Run2)]), as.character(.data$Run2)),
+      Sample1 = factor(.data$Sample1, levels = unique(display_levels)),
+      Sample2 = factor(.data$Sample2, levels = unique(display_levels))
+    )
+
+  ggplot(corr_df, aes(x = Sample1, y = Sample2, fill = Correlation)) +
+    geom_tile(color = "white", linewidth = 0.2) +
+    scale_fill_gradient2(
+      low = "#2C7BB6", mid = "white", high = "#D7191C",
+      midpoint = 0.9, limits = c(min(corr_df$Correlation, na.rm = TRUE), 1)
+    ) +
+    labs(x = NULL, y = NULL, title = title, fill = "Pearson r") +
+    theme_minimal(base_size = 11) +
+    theme(
+      axis.text.x = element_text(angle = 45, hjust = 1),
+      panel.grid = element_blank()
+    )
+}
+
+plot_pca_from_matrix <- function(feature_matrix, sample_annotation, title) {
+  if (ncol(feature_matrix) < 3 || nrow(feature_matrix) < 2) {
+    message("PCA skipped: at least 3 runs and 2 quantified features are required.")
+    return(invisible(NULL))
+  }
+
+  mat <- impute_matrix_by_row_mean(feature_matrix)
+  if (ncol(mat) < 3 || nrow(mat) < 2) {
+    message("PCA skipped: not enough complete, variable features after imputation.")
+    return(invisible(NULL))
+  }
+
+  pca <- stats::prcomp(t(mat), center = TRUE, scale. = FALSE)
+  var_explained <- (pca$sdev^2) / sum(pca$sdev^2)
+
+  pca_df <- as.data.frame(pca$x[, seq_len(min(2, ncol(pca$x))), drop = FALSE]) |>
+    tibble::rownames_to_column("Run") |>
+    left_join(sample_annotation, by = "Run") |>
+    mutate(
+      PcaLabel = if_else(
+        !is.na(.data$BioReplicate) & nzchar(as.character(.data$BioReplicate)),
+        paste0("BR", .data$BioReplicate),
+        coalesce(.data$FigureLabel, .data$Run)
+      )
+    )
+
+  ggplot(pca_df, aes(x = PC1, y = PC2, color = Condition, label = PcaLabel)) +
+    geom_point(size = 3, alpha = 0.9) +
+    ggrepel::geom_text_repel(size = 3, max.overlaps = 20, show.legend = FALSE) +
+    labs(
+      title = title,
+      x = paste0("PC1 (", scales::percent(var_explained[[1]], accuracy = 0.1), ")"),
+      y = paste0("PC2 (", scales::percent(var_explained[[2]], accuracy = 0.1), ")")
+    ) +
+    theme_bw(base_size = 12)
+}
+
+make_protein_level_matrix <- function(processed_data, max_features = params$qc_max_features) {
+  protein_level <- as_plain_tibble(processed_data[["ProteinLevelData"]])
+  protein_col <- first_existing_col(protein_level, c("Protein", "PROTEIN", "ProteinName"))
+  run_col <- first_existing_col(protein_level, c("Run", "RUN", "originalRUN", "SUBJECT", "BioReplicate"))
+  value_col <- first_existing_col(protein_level, c("LogIntensities", "log2Intensity", "ABUNDANCE", "Intensity"))
+
+  if (is.null(protein_col) || is.null(run_col) || is.null(value_col)) {
+    message("Protein-level matrix skipped: required MSstats columns were not found.")
+    return(matrix(numeric(), nrow = 0, ncol = 0))
+  }
+
+  make_feature_run_matrix(protein_level, protein_col, run_col, value_col, max_features)
+}
+
+extract_distribution_data <- function(data, stage_label) {
+  tbl <- as_plain_tibble(data)
+  run_col <- first_existing_col(tbl, c("Run", "RUN", "originalRUN", "SpectrumFile"))
+  condition_col <- first_existing_col(tbl, c("Condition", "GROUP", "GROUP_ORIGINAL", "Condition_ORIGINAL"))
+  value_col <- first_existing_col(tbl, c("LogIntensities", "log2Intensity", "ABUNDANCE", "Intensity", "Quan Value"))
+
+  if (is.null(run_col) || is.null(value_col)) {
+    return(tibble(Stage = character(), Run = character(),
+                  Condition = character(), log2Intensity = numeric()))
+  }
+
+  tbl |>
+    transmute(
+      Stage = stage_label,
+      Run = as.character(.data[[run_col]]),
+      Condition = if (!is.null(condition_col)) as.character(.data[[condition_col]]) else NA_character_,
+      log2Intensity = coerce_log2_intensity(.data[[value_col]], value_col)
+    ) |>
+    filter(is.finite(.data$log2Intensity))
+}
+
+extract_normalized_distribution_data <- function(
+  data,
+  normalization_method = "equalizeMedians",
+  stage_label = "After normalization"
+) {
+  tbl <- as_plain_tibble(data)
+  run_col <- first_existing_col(tbl, c("Run", "RUN", "originalRUN", "SpectrumFile"))
+  condition_col <- first_existing_col(tbl, c("Condition", "GROUP", "GROUP_ORIGINAL", "Condition_ORIGINAL"))
+  value_col <- first_existing_col(tbl, c("LogIntensities", "log2Intensity", "ABUNDANCE", "Intensity", "Quan Value"))
+  fraction_col <- first_existing_col(tbl, c("Fraction", "FRACTION"))
+  label_col <- first_existing_col(tbl, c("IsotopeLabelType", "LABEL"))
+
+  empty_result <- tibble(
+    Stage = character(), Run = character(),
+    Condition = character(), log2Intensity = numeric()
+  )
+  if (is.null(run_col) || is.null(value_col)) return(empty_result)
+
+  distribution <- tbl |>
+    transmute(
+      Run = as.character(.data[[run_col]]),
+      Condition = if (!is.null(condition_col)) as.character(.data[[condition_col]]) else NA_character_,
+      Fraction = if (!is.null(fraction_col)) as.character(.data[[fraction_col]]) else "1",
+      Label = if (!is.null(label_col)) as.character(.data[[label_col]]) else "L",
+      log2Intensity = coerce_log2_intensity(.data[[value_col]], value_col)
+    ) |>
+    filter(is.finite(.data$log2Intensity))
+
+  method <- toupper(as.character(normalization_method))
+  if (method %in% c("NONE", "FALSE")) {
+    return(distribution |>
+      transmute(Stage = stage_label, .data$Run, .data$Condition, .data$log2Intensity))
+  }
+  if (method != "EQUALIZEMEDIANS") {
+    stop(
+      "Normalization diagnostic currently supports equalizeMedians or no normalization; requested: ",
+      normalization_method,
+      call. = FALSE
+    )
+  }
+
+  label_values <- unique(distribution$Label[!is.na(distribution$Label)])
+  reference_label <- if (length(label_values) == 1L) label_values[[1]] else "H"
+  run_medians <- distribution |>
+    group_by(.data$Run, .data$Fraction) |>
+    summarise(
+      RunMedian = median(
+        .data$log2Intensity[.data$Label == reference_label],
+        na.rm = TRUE
+      ),
+      .groups = "drop"
+    )
+
+  distribution |>
+    left_join(run_medians, by = c("Run", "Fraction")) |>
+    group_by(.data$Fraction) |>
+    mutate(FractionMedian = median(.data$RunMedian, na.rm = TRUE)) |>
+    ungroup() |>
+    transmute(
+      Stage = stage_label,
+      .data$Run,
+      .data$Condition,
+      log2Intensity = .data$log2Intensity - .data$RunMedian + .data$FractionMedian
+    ) |>
+    filter(is.finite(.data$log2Intensity))
+}
+
+summarize_flag_columns <- function(data, patterns) {
+  tbl <- as_plain_tibble(data)
+  flag_cols <- names(tbl)[stringr::str_detect(tolower(names(tbl)), patterns)]
+  if (length(flag_cols) == 0) {
+    return(tibble(column = character(), value = character(), n = integer()))
+  }
+
+  purrr::map_dfr(flag_cols, function(col) {
+    tbl |>
+      mutate(.value = as.character(.data[[col]]),
+             .value = if_else(is.na(.data$.value) | !nzchar(.data$.value),
+                              "Missing/blank", .data$.value)) |>
+      count(value = .data$.value, name = "n") |>
+      mutate(column = col, .before = 1) |>
+      arrange(.data$column, desc(.data$n))
+  })
+}
+```
+
+## Sample Annotation
+
+```{r sample-annotation}
+annotation |>
+  mutate(.bioreplicate_order = suppressWarnings(as.numeric(.data$BioReplicate))) |>
+  arrange(
+    .data$Condition,
+    is.na(.data$.bioreplicate_order),
+    .data$.bioreplicate_order,
+    .data$BioReplicate,
+    .data$`File Name`
+  ) |>
+  select(`File Name`, Condition, BioReplicate) |>
+  knitr::kable(caption = "Sample annotation used in the MSstats analysis.")
+```
+
+## Raw Data Overview
+
+```{r raw-summary}
+psm_summary <- tibble(
+  metric = c(
+    "PSM rows",
+    "Runs",
+    "Conditions",
+    "Protein accessions",
+    "Annotated peptide sequences",
+    "Non-missing quant values"
+  ),
+  value = c(
+    nrow(psm),
+    dplyr::n_distinct(psm$SpectrumFile),
+    dplyr::n_distinct(annotation$Condition),
+    dplyr::n_distinct(psm$`Master Protein Accessions`, na.rm = TRUE),
+    dplyr::n_distinct(psm$`Annotated Sequence`, na.rm = TRUE),
+    sum(!is.na(psm$`Quan Value`))
+  )
+)
+
+knitr::kable(psm_summary, caption = "Summary of the raw PSM dataset.")
+```
+
+```{r annotation-summary}
+annotation |>
+  count(Condition, name = "runs") |>
+  arrange(Condition) |>
+  knitr::kable(caption = "Number of experimental runs by condition.")
+```
+
+```{r raw-psm-counts, fig.cap="PSM counts for each sample before filtering, colored by experimental condition."}
+psm |>
+  count(SpectrumFile, name = "psms") |>
+  left_join(annotation, by = c("SpectrumFile" = "Run")) |>
+  ggplot(aes(x = reorder(FigureLabel, psms), y = psms, fill = Condition)) +
+  geom_col() +
+  coord_flip() +
+  labs(x = "Sample", y = "PSM rows", title = "PSM rows per sample") +
+  theme_bw()
+```
+
+## Raw Data QC
+
+These checks look at the unfiltered PSM export. They are meant to catch run-level
+dropout, low-intensity samples, contaminant burden, shared peptide burden, and
+unexpected charge or modification patterns before any MSstats modeling.
+
+```{r raw-missingness-zero-summary}
+raw_intensity_qc <- psm |>
+  left_join(annotation, by = c("SpectrumFile" = "Run")) |>
+  group_by(.data$SpectrumFile, .data$FigureLabel, .data$Condition) |>
+  summarise(
+    psm_rows = n(),
+    missing_intensity = sum(is.na(.data$`Quan Value`)),
+    non_positive_intensity = sum(!is.na(.data$`Quan Value`) & .data$`Quan Value` <= 0),
+    positive_intensity = sum(!is.na(.data$`Quan Value`) & .data$`Quan Value` > 0),
+    missing_or_non_positive_percent =
+      100 * (.data$missing_intensity + .data$non_positive_intensity) / .data$psm_rows,
+    .groups = "drop"
+  ) |>
+  arrange(.data$Condition, .data$SpectrumFile)
+
+knitr::kable(
+  raw_intensity_qc,
+  digits = 2,
+  caption = "Raw intensity completeness and non-positive values by sample."
+)
+```
+
+```{r raw-missingness-zero-plot, fig.height=6, fig.cap="Raw PSM intensity-status counts per sample, separating positive, non-positive, and missing quantitative values."}
+raw_intensity_qc |>
+  tidyr::pivot_longer(
+    cols = c("missing_intensity", "non_positive_intensity", "positive_intensity"),
+    names_to = "status",
+    values_to = "rows"
+  ) |>
+  mutate(
+    status = factor(
+      .data$status,
+      levels = c("positive_intensity", "non_positive_intensity", "missing_intensity"),
+      labels = c("Positive", "Non-positive", "Missing")
+    )
+  ) |>
+  ggplot(aes(x = reorder(.data$FigureLabel, .data$rows), y = .data$rows, fill = .data$status)) +
+  geom_col() +
+  coord_flip() +
+  labs(x = "Sample", y = "PSM rows", fill = "Intensity status",
+       title = "Raw PSM intensity status per sample") +
+  theme_bw()
+```
+
+```{r raw-intensity-distribution, fig.height=7, fig.cap="Distribution of raw log2 PSM intensities for each sample, colored by condition."}
+psm |>
+  filter(!is.na(.data$`Quan Value`), .data$`Quan Value` > 0) |>
+  left_join(annotation, by = c("SpectrumFile" = "Run")) |>
+  mutate(log2QuanValue = log2(.data$`Quan Value`)) |>
+  ggplot(aes(x = reorder(.data$FigureLabel, .data$log2QuanValue, median),
+             y = .data$log2QuanValue, fill = .data$Condition)) +
+  geom_boxplot(outlier.alpha = 0.15, outlier.size = 0.4) +
+  coord_flip() +
+  labs(x = "Sample", y = "log2(Quan Value)",
+       title = "Raw intensity distribution per sample") +
+  theme_bw()
+```
+
+```{r raw-intensity-density, fig.height=6, fig.cap="Kernel-density curves of raw log2 PSM intensities for each sample, colored by condition."}
+psm |>
+  filter(!is.na(.data$`Quan Value`), .data$`Quan Value` > 0) |>
+  left_join(annotation, by = c("SpectrumFile" = "Run")) |>
+  mutate(log2QuanValue = log2(.data$`Quan Value`)) |>
+  ggplot(aes(x = .data$log2QuanValue, color = .data$Condition, group = .data$SpectrumFile)) +
+  geom_density(alpha = 0.45, linewidth = 0.5) +
+  labs(x = "log2(Quan Value)", y = "Density",
+       title = "Raw intensity density per run") +
+  theme_bw()
+```
+
+```{r raw-contaminant-shared-single-summary}
+contaminant_rows <- if ("Contaminant" %in% names(psm)) {
+  sum(is_truthy_flag(psm$Contaminant))
+} else {
+  NA_integer_
+}
+
+shared_peptide_rows <- if ("# Proteins" %in% names(psm)) {
+  sum(suppressWarnings(as.numeric(psm$`# Proteins`)) > 1, na.rm = TRUE)
+} else {
+  NA_integer_
+}
+
+single_peptide_proteins <- psm |>
+  filter(!is.na(.data$`Master Protein Accessions`),
+         !is.na(.data$`Annotated Sequence`)) |>
+  distinct(.data$`Master Protein Accessions`, .data$`Annotated Sequence`) |>
+  count(.data$`Master Protein Accessions`, name = "unique_peptides") |>
+  summarise(n = sum(.data$unique_peptides == 1)) |>
+  pull(.data$n)
+
+tibble(
+  metric = c(
+    "Contaminant PSM rows",
+    "Shared peptide PSM rows (# Proteins > 1)",
+    "Proteins represented by one unique peptide"
+  ),
+  value = c(contaminant_rows, shared_peptide_rows, single_peptide_proteins)
+) |>
+  knitr::kable(
+    caption = "Contaminant, shared-peptide, and single-peptide-protein summary."
+  )
+```
+
+```{r raw-charge-distribution, fig.height=5, fig.cap="Raw PSM counts by precursor charge state."}
+if ("Charge" %in% names(psm)) {
+  psm |>
+    mutate(Charge = as.character(.data$Charge)) |>
+    count(.data$Charge, name = "psm_rows") |>
+    ggplot(aes(x = .data$Charge, y = .data$psm_rows)) +
+    geom_col(fill = "#4C72B0") +
+    labs(x = "Charge", y = "PSM rows", title = "Charge-state distribution") +
+    theme_bw()
+} else {
+  message("Charge-state plot skipped: Charge column was not found.")
+}
+```
+
+```{r raw-modification-distribution, fig.height=5, fig.cap="Raw PSM counts for modified and unmodified peptide-spectrum matches."}
+if ("Modifications" %in% names(psm)) {
+  psm |>
+    mutate(
+      modification_status = if_else(has_modification(.data$Modifications),
+                                    "Modified", "Unmodified")
+    ) |>
+    count(.data$modification_status, name = "psm_rows") |>
+    ggplot(aes(x = .data$modification_status, y = .data$psm_rows,
+               fill = .data$modification_status)) +
+    geom_col(show.legend = FALSE) +
+    labs(x = NULL, y = "PSM rows", title = "Modified vs unmodified PSM rows") +
+    theme_bw()
+} else {
+  message("Modification plot skipped: Modifications column was not found.")
+}
+```
+
+## Preprocessing for MSstats
+
+The PSM table is filtered before conversion. By default this report keeps high-confidence PSMs, removes rows flagged as contaminants when that column is present, and removes non-positive or missing intensities.
+
+```{r preprocess-for-msstats}
+psm_filtered <- psm |>
+  filter(!is.na(`Quan Value`), `Quan Value` > 0)
+
+if (!is.null(params$filter_confidence) && "Confidence" %in% names(psm_filtered)) {
+  psm_filtered <- psm_filtered |>
+    filter(.data$Confidence == params$filter_confidence)
+}
+
+if (isTRUE(params$remove_contaminants) && "Contaminant" %in% names(psm_filtered)) {
+  psm_filtered <- psm_filtered |>
+    filter(is.na(.data$Contaminant) | .data$Contaminant == FALSE)
+}
+
+preprocess_summary <- tibble(
+  step = c("Raw PSM rows", "Rows after filtering"),
+  rows = c(nrow(psm), nrow(psm_filtered))
+)
+
+knitr::kable(
+  preprocess_summary,
+  caption = "PSM row counts before and after MSstats input filtering."
+)
+```
+
+## Filtered Input QC
+
+These summaries describe the data that will actually be submitted to
+`MSstats::PDtoMSstatsFormat()`.
+
+```{r filtered-feature-counts}
+psm_filtered_features <- add_psm_feature_id(psm_filtered)
+
+filtered_run_qc <- psm_filtered_features |>
+  left_join(annotation, by = c("SpectrumFile" = "Run")) |>
+  group_by(.data$SpectrumFile, .data$FigureLabel, .data$Condition) |>
+  summarise(
+    psm_rows = n(),
+    annotated_sequences = n_distinct(.data$`Annotated Sequence`, na.rm = TRUE),
+    peptide_charge_features = n_distinct(.data$.qc_feature_id, na.rm = TRUE),
+    protein_accessions = n_distinct(.data$`Master Protein Accessions`, na.rm = TRUE),
+    median_log2_intensity = median(log2(.data$`Quan Value`), na.rm = TRUE),
+    .groups = "drop"
+  ) |>
+  arrange(.data$Condition, .data$SpectrumFile)
+
+knitr::kable(
+  filtered_run_qc,
+  digits = 2,
+  caption = "Filtered MSstats input features and intensities by sample."
+)
+```
+
+```{r filtered-feature-counts-plot, fig.height=7, fig.cap="Filtered PSM, annotated-sequence, peptide-charge-feature, and protein-accession counts for each sample."}
+filtered_run_qc |>
+  select(SpectrumFile, FigureLabel, Condition, psm_rows, annotated_sequences,
+         peptide_charge_features, protein_accessions) |>
+  tidyr::pivot_longer(
+    cols = c("psm_rows", "annotated_sequences",
+             "peptide_charge_features", "protein_accessions"),
+    names_to = "metric",
+    values_to = "count"
+  ) |>
+  mutate(
+    metric = factor(
+      .data$metric,
+      levels = c("psm_rows", "annotated_sequences",
+                 "peptide_charge_features", "protein_accessions"),
+      labels = c("PSM rows", "Annotated sequences",
+                 "Peptide-charge features", "Protein accessions")
+    )
+  ) |>
+  ggplot(aes(x = reorder(.data$FigureLabel, .data$count),
+             y = .data$count, fill = .data$Condition)) +
+  geom_col() +
+  coord_flip() +
+  facet_wrap(~ metric, scales = "free_x") +
+  labs(x = "Sample", y = "Count",
+       title = "Filtered PSM, peptide, feature, and protein counts per sample") +
+  theme_bw()
+```
+
+```{r filtered-run-correlation, fig.height=8, fig.cap="Pearson correlations among filtered peptide-charge feature profiles; samples are labeled by condition and biological replicate."}
+filtered_feature_matrix <- make_feature_run_matrix(
+  psm_filtered_features,
+  feature_col = ".qc_feature_id",
+  run_col = "SpectrumFile",
+  value_col = "Quan Value"
+)
+
+plot_correlation_heatmap(
+  filtered_feature_matrix,
+  annotation,
+  title = "Filtered PSM feature correlation between runs"
+)
+```
+
+```{r helper-functions}
+convert_pd_to_msstats <- function(psm_table, annotation_table) {
+  MSstats::PDtoMSstatsFormat(
+    input = psm_table,
+    annotation = annotation_table,
+    useUniquePeptide = params$remove_shared_peptides,
+    summaryforMultipleRows = max,
+    removeFewMeasurements = params$remove_few_measurements,
+    removeProtein_with1Peptide = params$remove_single_peptide_proteins,
+    which.quantification = "Quan Value",
+    which.proteinid = "Master Protein Accessions",
+    which.sequence = "Annotated Sequence",
+    use_log_file = FALSE,
+    verbose = FALSE
+  )
+}
+
+process_msstats <- function(msstats_input) {
+  MSstats::dataProcess(
+    raw = msstats_input,
+    logTrans = 2,
+    normalization = params$normalization,
+    summaryMethod = params$summary_method,
+    MBimpute = params$mb_impute,
+    use_log_file = FALSE,
+    verbose = FALSE,
+    numberOfCores = params$number_of_cores
+  )
+}
+
+make_contrast_matrix <- function(groups, contrast_table) {
+  missing_groups <- setdiff(unique(c(contrast_table$numerator, contrast_table$denominator)), groups)
+  if (length(missing_groups) > 0) {
+    stop("Contrast group(s) not present in processed data: ", paste(missing_groups, collapse = ", "), call. = FALSE)
+  }
+
+  contrast_matrix <- matrix(
+    0,
+    nrow = nrow(contrast_table),
+    ncol = length(groups),
+    dimnames = list(contrast_table$label, groups)
+  )
+  for (i in seq_len(nrow(contrast_table))) {
+    contrast_matrix[i, contrast_table$numerator[i]] <- 1
+    contrast_matrix[i, contrast_table$denominator[i]] <- -1
+  }
+  contrast_matrix
+}
+
+make_weighted_contrast_matrix <- function(groups, label, weights) {
+  missing_groups <- setdiff(names(weights), groups)
+  if (length(missing_groups) > 0) {
+    stop("Contrast group(s) not present in processed data: ", paste(missing_groups, collapse = ", "), call. = FALSE)
+  }
+
+  contrast_matrix <- matrix(
+    0,
+    nrow = 1,
+    ncol = length(groups),
+    dimnames = list(label, groups)
+  )
+  contrast_matrix[label, names(weights)] <- weights
+  contrast_matrix
+}
+
+run_group_comparison <- function(processed_data, contrast_table) {
+  groups <- processed_groups(processed_data)
+  contrast_matrix <- make_contrast_matrix(groups, contrast_table)
+
+  run_group_comparison_matrix(processed_data, contrast_matrix)
+}
+
+run_group_comparison_matrix <- function(processed_data, contrast_matrix) {
+  comparison <- MSstats::groupComparison(
+    contrast.matrix = contrast_matrix,
+    data = processed_data,
+    use_log_file = FALSE,
+    verbose = FALSE,
+    numberOfCores = params$number_of_cores
+  )
+
+  list(
+    contrast_matrix = contrast_matrix,
+    comparison = comparison,
+    results = as_plain_tibble(comparison[["ComparisonResult"]])
+  )
+}
+
+choose_break_interval <- function(values, side, quantile_prob, min_ratio) {
+  values <- values[is.finite(values)]
+  if (length(values) == 0) return(NULL)
+
+  abs_values <- abs(values)
+  core_limit <- max(
+    stats::quantile(abs_values, quantile_prob, na.rm = TRUE, names = FALSE),
+    params$volcano_fc_cutoff * 1.5,
+    2
+  )
+  max_abs <- max(abs_values, na.rm = TRUE)
+  if (!is.finite(max_abs) || max_abs < core_limit * min_ratio) return(NULL)
+
+  if (side == "positive") {
+    extreme_edge <- min(values[values > core_limit], na.rm = TRUE)
+    if (!is.finite(extreme_edge) || extreme_edge <= core_limit) return(NULL)
+    c(core_limit, extreme_edge * 0.9)
+  } else {
+    extreme_edge <- max(values[values < -core_limit], na.rm = TRUE)
+    if (!is.finite(extreme_edge) || extreme_edge >= -core_limit) return(NULL)
+    c(extreme_edge * 0.9, -core_limit)
+  }
+}
+
+choose_y_break_interval <- function(neg_log10_p, quantile_prob, min_ratio) {
+  neg_log10_p <- neg_log10_p[is.finite(neg_log10_p)]
+  if (length(neg_log10_p) == 0) return(NULL)
+
+  core_limit <- max(
+    stats::quantile(neg_log10_p, quantile_prob, na.rm = TRUE, names = FALSE),
+    -log10(params$volcano_p_cutoff) * 1.5,
+    5
+  )
+  max_y <- max(neg_log10_p, na.rm = TRUE)
+  if (!is.finite(max_y) || max_y < core_limit * min_ratio) return(NULL)
+
+  extreme_edge <- min(neg_log10_p[neg_log10_p > core_limit], na.rm = TRUE)
+  if (!is.finite(extreme_edge) || extreme_edge <= core_limit) return(NULL)
+
+  c(core_limit, extreme_edge * 0.9)
+}
+
+apply_split_axes <- function(plot, plot_data, fc_col, p_col) {
+  split_scales <- params$volcano_split_axis_scales
+  split_quantile <- params$volcano_split_axis_quantile
+  split_min_ratio <- params$volcano_split_axis_min_ratio
+
+  x_values <- plot_data[[fc_col]]
+  x_neg_break <- choose_break_interval(x_values, "negative", split_quantile, split_min_ratio)
+  x_pos_break <- choose_break_interval(x_values, "positive", split_quantile, split_min_ratio)
+  y_break <- choose_y_break_interval(-log10(plot_data[[p_col]]), split_quantile, split_min_ratio)
+
+  if (!is.null(x_neg_break) && diff(x_neg_break) > 0) {
+    plot <- plot + ggbreak::scale_x_break(x_neg_break, scales = split_scales)
+  }
+  if (!is.null(x_pos_break) && diff(x_pos_break) > 0) {
+    plot <- plot + ggbreak::scale_x_break(x_pos_break, scales = split_scales)
+  }
+  if (!is.null(y_break) && diff(y_break) > 0) {
+    plot <- plot + ggbreak::scale_y_break(y_break, scales = split_scales)
+  }
+
+  plot
+}
+
+plot_volcano <- function(results, comparison_label, p_col = "adj.pvalue", fc_col = "log2FC") {
+  plot_data <- results |>
+    filter(.data$Label == comparison_label) |>
+    mutate(
+      .volcano_p = pmax(.data[[p_col]], .Machine$double.xmin)
+    ) |>
+    filter(is.finite(.data[[fc_col]]), is.finite(.data$.volcano_p))
+
+  plot_data <- plot_data |>
+    mutate(
+      GeneSymbol = map_uniprot_to_gene_symbol(.data$Protein),
+      .volcano_label = if_else(
+        !is.na(.data$GeneSymbol) & nzchar(.data$GeneSymbol),
+        .data$GeneSymbol,
+        ""
+      )
+    )
+
+  top_labels <- plot_data |>
+    filter(
+      nzchar(.data$.volcano_label),
+      .data$.volcano_p < params$volcano_p_cutoff
+    ) |>
+    arrange(.data$.volcano_p, desc(abs(.data[[fc_col]]))) |>
+    slice_head(n = params$volcano_top_labels) |>
+    pull(.data$.volcano_label)
+
+  if (length(top_labels) == 0) {
+    top_labels <- plot_data |>
+      filter(nzchar(.data$.volcano_label)) |>
+      arrange(.data$.volcano_p, desc(abs(.data[[fc_col]]))) |>
+      slice_head(n = params$volcano_top_labels) |>
+      pull(.data$.volcano_label)
+  }
+
+  volcano_plot <- EnhancedVolcano::EnhancedVolcano(
+    plot_data,
+    lab = plot_data$.volcano_label,
+    x = fc_col,
+    y = ".volcano_p",
+    selectLab = top_labels,
+    pCutoff = params$volcano_p_cutoff,
+    FCcutoff = params$volcano_fc_cutoff,
+    title = gsub(
+      "_", " ",
+      sub("_vs_", "/", comparison_label, fixed = TRUE),
+      fixed = TRUE
+    ),
+    subtitle = "MSstats protein-level comparison",
+    caption = paste0(
+      "Adjusted p < ", params$volcano_p_cutoff,
+      "; |log2FC| > ", params$volcano_fc_cutoff
+    ),
+    xlab = "Log2 fold change",
+    ylab = "-Log10 adjusted p-value",
+    pointSize = 2.2,
+    labSize = 4.0,
+    col = c("grey78", "grey45", "#4C72B0", "#C44E52"),
+    colAlpha = 0.82,
+    legendLabels = c(
+      "Not significant",
+      "Meets absolute log2 fold-change threshold only",
+      "Meets adjusted p-value threshold only",
+      "Meets both adjusted p-value and fold-change thresholds"
+    ),
+    legendPosition = "bottom",
+    legendLabSize = 9,
+    legendIconSize = 3.5,
+    drawConnectors = TRUE,
+    widthConnectors = 0.35,
+    colConnectors = "grey35"
+  ) +
+    theme_classic(base_size = 12) +
+    theme(
+      plot.title = element_text(face = "bold", size = 16, margin = margin(b = 5)),
+      plot.subtitle = element_text(size = 11, color = "grey30", margin = margin(b = 8)),
+      plot.caption = element_text(size = 9, color = "grey30", margin = margin(t = 8)),
+      axis.title = element_text(face = "bold", size = 12),
+      axis.text = element_text(size = 10, color = "black"),
+      legend.title = element_blank(),
+      legend.position = "bottom",
+      legend.box = "vertical",
+      legend.text = element_text(size = 9),
+      legend.margin = margin(t = 8),
+      plot.margin = margin(12, 18, 12, 12)
+    ) +
+    guides(
+      colour = guide_legend(nrow = 2, byrow = TRUE),
+      shape = guide_legend(nrow = 2, byrow = TRUE)
+    )
+
+  static_plot <- apply_split_axes(volcano_plot, plot_data, fc_col, ".volcano_p")
+  static_file <- file.path(
+    figure_dir,
+    paste0(params$request, "-", tolower(comparison_label), "-volcano.pdf")
+  )
+  ggplot2::ggsave(
+    static_file,
+    plot = static_plot,
+    width = 12,
+    height = 10,
+    units = "in",
+    bg = "white"
+  )
+
+  static_plot
+}
+
+create_dt <- function(data, download_basename, page_length = 25, filter = "top") {
+  DT::datatable(
+    data,
+    rownames = FALSE,
+    filter = filter,
+    extensions = c("Buttons", "Scroller", "SearchBuilder"),
+    width = "100%",
+    options = list(
+      dom = "QBlrtip",
+      scrollX = TRUE,
+      scrollY = 650,
+      scrollCollapse = TRUE,
+      scroller = TRUE,
+      deferRender = TRUE,
+      pageLength = page_length,
+      lengthMenu = list(
+        c(10, 25, 50, 100, -1),
+        c("10", "25", "50", "100", "All")
+      ),
+      buttons = list(
+        list(extend = "copy"),
+        list(extend = "csv", filename = download_basename),
+        list(extend = "excel", filename = download_basename)
+      ),
+      columnDefs = list(list(width = "42%", targets = 5))
+    )
+  )
+}
+
+format_p_values <- function(data) {
+  p_cols <- intersect(
+    c("adj.pvalue", "pvalue", "p_val_adj", "p_val"),
+    names(data)
+  )
+  data |>
+    dplyr::mutate(dplyr::across(
+      dplyr::all_of(p_cols),
+      ~ ifelse(is.na(.x), NA_character_, formatC(.x, format = "e", digits = 2))
+    ))
+}
+
+prepare_de_table <- function(results, comparison_label) {
+  result_data <- add_power_metrics(
+    results,
+    alpha = params$power_alpha,
+    target_power = params$power_target,
+    effect_log2fc = params$power_effect_log2fc
+  ) |>
+    as.data.frame()
+
+  for (column in c(
+    "issue", "MissingPercentage", "ImputationPercentage",
+    "target_log2fc_power", "detectable_log2fc_at_target_power",
+    "observed_effect_power"
+  )) {
+    if (!column %in% names(result_data)) result_data[[column]] <- NA
+  }
+
+  result_data |>
+    as_tibble() |>
+    filter(
+      .data$Label == comparison_label,
+      is.finite(.data$log2FC),
+      is.finite(.data$pvalue),
+      is.finite(.data$adj.pvalue),
+      .data$adj.pvalue < params$volcano_p_cutoff,
+      abs(.data$log2FC) > params$volcano_fc_cutoff
+    ) |>
+    mutate(
+      Accession = .data$Protein,
+      Gene = map_uniprot_to_gene_symbol(.data$Protein),
+      Note = purrr::pmap_chr(
+        list(
+          .data$issue, .data$MissingPercentage, .data$ImputationPercentage,
+          .data$Gene, .data$target_log2fc_power,
+          .data$detectable_log2fc_at_target_power, .data$observed_effect_power
+        ),
+        function(issue, missing, imputation, gene, target_power, detectable_effect,
+                 observed_power) {
+          flags <- character()
+          issue_text <- trimws(as.character(issue))
+          if (!is.na(issue_text) && nzchar(issue_text) &&
+              !tolower(issue_text) %in% c("na", "none", "false", "0")) {
+            flags <- c(flags, paste0("MSstats flag: ", issue_text))
+          }
+          missing_value <- suppressWarnings(as.numeric(missing))
+          if (is.finite(missing_value) && missing_value > 0) {
+            flags <- c(flags, paste0("Missing measurements: ", round(missing_value, 1), "%"))
+          }
+          imputation_value <- suppressWarnings(as.numeric(imputation))
+          if (is.finite(imputation_value) && imputation_value > 0) {
+            flags <- c(flags, paste0("Imputed measurements: ", round(imputation_value, 1), "%"))
+          }
+          if (is.na(gene) || !nzchar(gene)) {
+            flags <- c(flags, "Gene symbol unavailable")
+          }
+          target_power_value <- suppressWarnings(as.numeric(target_power))
+          detectable_effect_value <- suppressWarnings(as.numeric(detectable_effect))
+          if (is.finite(target_power_value) && target_power_value < params$power_target) {
+            power_note <- paste0(
+              "Power caution: ", scales::percent(target_power_value, accuracy = 1),
+              " power for target |log2FC| = ", abs(params$power_effect_log2fc),
+              " (below ", scales::percent(params$power_target, accuracy = 1), ")"
+            )
+            if (is.finite(detectable_effect_value)) {
+              power_note <- paste0(
+                power_note, "; estimated minimum |log2FC| = ",
+                round(detectable_effect_value, 2)
+              )
+            }
+            flags <- c(flags, power_note)
+          }
+          observed_power_value <- suppressWarnings(as.numeric(observed_power))
+          if (is.finite(observed_power_value) && observed_power_value < params$power_target) {
+            flags <- c(
+              flags,
+              paste0(
+                "Observed-effect detectability is ",
+                scales::percent(observed_power_value, accuracy = 1),
+                "; interpret cautiously (not independent evidence)"
+              )
+            )
+          }
+          if (length(flags) == 0) "No additional flags." else paste(flags, collapse = "; ")
+        }
+      )
+    ) |>
+    arrange(.data$adj.pvalue, desc(abs(.data$log2FC))) |>
+    select(Accession, Gene, log2FC, pvalue, adj.pvalue, Note) |>
+    format_p_values()
+}
+
+as_plain_tibble <- function(x) {
+  tibble::as_tibble(as.data.frame(x))
+}
+
+condition_column <- function(data) {
+  candidates <- c("GROUP_ORIGINAL", "GROUP", "Condition", "Condition_ORIGINAL")
+  found <- intersect(candidates, names(data))
+  if (length(found) == 0) {
+    stop(
+      "Could not find a condition/group column. Available columns: ",
+      paste(names(data), collapse = ", "),
+      call. = FALSE
+    )
+  }
+  found[1]
+}
+
+processed_groups <- function(processed_data) {
+  protein_level <- as_plain_tibble(processed_data[["ProteinLevelData"]])
+  group_col <- condition_column(protein_level)
+  sort(unique(as.character(protein_level[[group_col]])))
+}
+
+protein_level_group_summary <- function(processed_data) {
+  protein_level <- as_plain_tibble(processed_data[["ProteinLevelData"]])
+  group_col <- condition_column(protein_level)
+
+  protein_level |>
+    count(Condition = .data[[group_col]], name = "protein_summaries") |>
+    arrange(.data$Condition)
+}
+
+write_results <- function(results, file_name) {
+  output_file <- file.path(output_dir, file_name)
+  readr::write_csv(results, output_file)
+  output_file
+}
+
+quietly_run <- function(expr) {
+  result <- NULL
+  invisible(utils::capture.output(
+    invisible(utils::capture.output(result <- force(expr), type = "message")),
+    type = "output"
+  ))
+  result
+}
+```
+
+## MSstats Processing QC
+
+These diagnostics evaluate the converted and processed MSstats data before group
+comparisons are interpreted.
+
+```{r convert-three-condition}
+msstats_input <- quietly_run(convert_pd_to_msstats(psm_filtered, annotation))
+
+as_plain_tibble(msstats_input) |>
+  count(Condition, Run, name = "features") |>
+  arrange(Condition, Run) |>
+  head(20) |>
+  knitr::kable(
+    caption = "Converted MSstats feature counts by condition and run (first 20 rows)."
+  )
+```
+
+```{r process-three-condition}
+processed <- quietly_run(process_msstats(msstats_input))
+
+protein_level_group_summary(processed) |>
+  knitr::kable(
+    caption = "MSstats protein-level measurement summary by experimental condition."
+  )
+```
+
+```{r normalization-diagnostic, fig.height=8, fig.cap="Sample intensity distributions before and after MSstats normalization."}
+normalization_distribution <- bind_rows(
+  extract_distribution_data(msstats_input, "Before normalization"),
+  extract_normalized_distribution_data(msstats_input, params$normalization)
+)
+
+if (nrow(normalization_distribution) > 0) {
+  normalization_distribution |>
+    left_join(
+      annotation |> select(.data$Run, .data$FigureLabel),
+      by = "Run"
+    ) |>
+    mutate(FigureLabel = coalesce(.data$FigureLabel, .data$Run)) |>
+    ggplot(aes(x = reorder(.data$FigureLabel, .data$log2Intensity, median),
+               y = .data$log2Intensity, fill = .data$Stage)) +
+    geom_boxplot(outlier.alpha = 0.08, outlier.size = 0.3) +
+    coord_flip() +
+    facet_wrap(~ Stage, scales = "free_x") +
+    labs(x = "Sample", y = "log2 intensity",
+         title = "Intensity distributions before and after MSstats normalization") +
+    theme_bw()
+} else {
+  message("Normalization diagnostic skipped: intensity columns were not found.")
+}
+```
+
+```{r processed-sample-annotation, include=FALSE}
+protein_level_tbl <- as_plain_tibble(processed[["ProteinLevelData"]])
+protein_run_col <- first_existing_col(
+  protein_level_tbl,
+  c("Run", "RUN", "originalRUN", "SUBJECT", "BioReplicate")
+)
+protein_condition_col <- first_existing_col(
+  protein_level_tbl,
+  c("GROUP_ORIGINAL", "GROUP", "Condition", "Condition_ORIGINAL")
+)
+
+processed_sample_annotation <- if (!is.null(protein_run_col)) {
+  processed_subjects <- protein_level_tbl |>
+    transmute(
+      Run = as.character(.data[[protein_run_col]]),
+      Condition = if (!is.null(protein_condition_col)) {
+        as.character(.data[[protein_condition_col]])
+      } else {
+        NA_character_
+      }
+    ) |>
+    distinct() |>
+    mutate(.run_order = suppressWarnings(as.numeric(.data$Run))) |>
+    arrange(.data$Condition, is.na(.data$.run_order), .data$.run_order, .data$Run) |>
+    group_by(.data$Condition) |>
+    mutate(.condition_index = row_number()) |>
+    ungroup()
+
+  annotation_subjects <- annotation |>
+    mutate(.bioreplicate_order = suppressWarnings(as.numeric(.data$BioReplicate))) |>
+    arrange(.data$Condition, is.na(.data$.bioreplicate_order),
+            .data$.bioreplicate_order, .data$BioReplicate) |>
+    group_by(.data$Condition) |>
+    mutate(.condition_index = row_number()) |>
+    ungroup() |>
+    select(.data$Condition, .data$.condition_index, .data$SampleName,
+           .data$BioReplicate, .data$FigureLabel)
+
+  processed_subjects |>
+    left_join(annotation_subjects, by = c("Condition", ".condition_index")) |>
+    select(Run, SampleName, BioReplicate, FigureLabel, Condition) |>
+    distinct()
+} else {
+  annotation
+}
+
+```
+
+```{r protein-level-correlation, fig.height=8, fig.cap="Pearson correlations among MSstats protein-level abundance profiles; samples are labeled by condition and biological replicate."}
+protein_level_matrix <- make_protein_level_matrix(processed)
+
+plot_correlation_heatmap(
+  protein_level_matrix,
+  processed_sample_annotation,
+  title = "MSstats protein-level correlation between samples"
+)
+```
+
+```{r protein-level-pca, fig.height=7, fig.cap="Principal component analysis of MSstats protein-level abundance profiles, colored by condition and labeled by biological replicate (BR#)."}
+plot_pca_from_matrix(
+  protein_level_matrix,
+  processed_sample_annotation,
+  title = "MSstats protein-level PCA"
+)
+```
+
+```{r protein-level-cv-summary}
+protein_col <- first_existing_col(protein_level_tbl, c("Protein", "PROTEIN", "ProteinName"))
+condition_col <- first_existing_col(protein_level_tbl, c("GROUP_ORIGINAL", "GROUP", "Condition", "Condition_ORIGINAL"))
+value_col <- first_existing_col(protein_level_tbl, c("LogIntensities", "log2Intensity", "ABUNDANCE", "Intensity"))
+
+if (!is.null(protein_col) && !is.null(condition_col) && !is.null(value_col)) {
+  protein_cv <- protein_level_tbl |>
+    transmute(
+      Protein = as.character(.data[[protein_col]]),
+      Condition = as.character(.data[[condition_col]]),
+      linearIntensity = 2^coerce_log2_intensity(.data[[value_col]], value_col)
+    ) |>
+    filter(is.finite(.data$linearIntensity), .data$linearIntensity > 0) |>
+    group_by(.data$Protein, .data$Condition) |>
+    summarise(
+      n_samples = n(),
+      mean_intensity = mean(.data$linearIntensity, na.rm = TRUE),
+      sd_intensity = stats::sd(.data$linearIntensity, na.rm = TRUE),
+      .groups = "drop"
+    ) |>
+    mutate(cv_percent = 100 * .data$sd_intensity / .data$mean_intensity) |>
+    filter(.data$n_samples >= 2, is.finite(.data$cv_percent))
+
+  protein_cv |>
+    group_by(.data$Condition) |>
+    summarise(
+      proteins = n(),
+      median_cv_percent = median(.data$cv_percent, na.rm = TRUE),
+      p75_cv_percent = stats::quantile(.data$cv_percent, 0.75, na.rm = TRUE),
+      p90_cv_percent = stats::quantile(.data$cv_percent, 0.90, na.rm = TRUE),
+      .groups = "drop"
+    ) |>
+    knitr::kable(
+      digits = 2,
+      caption = "Within-condition protein abundance coefficient-of-variation summary."
+    )
+} else {
+  protein_cv <- tibble()
+  message("Protein-level CV skipped: required protein, condition, or intensity columns were not found.")
+}
+```
+
+```{r protein-level-cv-plot, fig.height=6, fig.cap="Distributions of within-condition protein-level coefficients of variation."}
+if (nrow(protein_cv) > 0) {
+  ggplot(protein_cv, aes(x = .data$Condition, y = .data$cv_percent,
+                         fill = .data$Condition)) +
+    geom_violin(trim = TRUE, alpha = 0.65, show.legend = FALSE) +
+    geom_boxplot(width = 0.18, outlier.alpha = 0.15, show.legend = FALSE) +
+    labs(x = NULL, y = "CV (%)",
+         title = "Protein-level coefficient of variation within condition") +
+    theme_bw()
+}
+```
+
+```{r top-variable-proteins}
+if (nrow(protein_cv) > 0) {
+  protein_cv |>
+    arrange(desc(.data$cv_percent)) |>
+    mutate(
+      `Gene names` = map_uniprot_to_gene_symbol(.data$Protein),
+      .after = Protein
+    ) |>
+    select(Protein, `Gene names`, Condition, n_samples, cv_percent) |>
+    slice_head(n = params$qc_top_cv_proteins) |>
+    knitr::kable(
+      digits = 2,
+      caption = "Proteins with the highest within-condition coefficients of variation."
+    )
+}
+```
+
+## MSstats Analysis: Healthy, FC, and LC
+
+This analysis preserves the three conditions in the annotation file and tests FC vs Healthy, LC vs Healthy, and LC vs FC.
+
+```{r compare-three-condition}
+three_condition_contrasts <- tibble::tribble(
+  ~label, ~numerator, ~denominator,
+  "FC_vs_Healthy", "FC", "Healthy",
+  "LC_vs_Healthy", "LC", "Healthy",
+  "LC_vs_FC", "LC", "FC"
+)
+
+three_condition_contrast_matrix <- make_contrast_matrix(
+  processed_groups(processed),
+  three_condition_contrasts
+)
+
+infected_contrast_matrix <- make_weighted_contrast_matrix(
+  groups = processed_groups(processed),
+  label = "Infected_vs_Healthy",
+  weights = c(FC = 0.5, LC = 0.5, Healthy = -1)
+)
+
+all_contrast_matrix <- rbind(
+  three_condition_contrast_matrix,
+  infected_contrast_matrix
+)
+
+all_comparison_results <- quietly_run(
+  run_group_comparison_matrix(processed, all_contrast_matrix)
+)
+all_comparison_output <- all_comparison_results$results
+
+saveRDS(
+  list(
+    msstats_input = msstats_input,
+    processed_data = processed[["ProcessedData"]],
+    protein_level_data = processed[["ProteinLevelData"]],
+    annotation = annotation,
+    comparison_results = all_comparison_output
+  ),
+  file.path(output_dir, "msstats_workbook_export_objects.rds")
+)
+
+three_condition_output <- all_comparison_output |>
+  filter(.data$Label %in% three_condition_contrasts$label)
+infected_output <- all_comparison_output |>
+  filter(.data$Label == "Infected_vs_Healthy")
+
+three_condition_file <- write_results(three_condition_output, "msstats_three_condition_group_comparison.csv")
+infected_file <- write_results(infected_output, "msstats_infected_vs_healthy_group_comparison.csv")
+
+knitr::kable(
+  three_condition_contrast_matrix,
+  caption = "Contrast matrix for FC, LC, and Healthy comparisons."
+)
+```
+
+Volcano plots are publication-quality static `EnhancedVolcano` figures. Labels
+use gene symbols, connectors reduce label ambiguity, and the complete
+significance legend is written below each plot. Automatic `ggbreak` split axes
+keep extreme tails from compressing the main protein cloud. Each figure is also
+exported as a vector PDF in the `figures` directory.
+
+::: {.panel-tabset .volcano-tabset}
+
+### FC vs Healthy
+
+```{r fig-volcano-fc-vs-healthy, fig.width=12, fig.height=10, dpi=300, out.width="100%", fig.cap="Protein-level volcano plot for FC versus Healthy. Dashed thresholds show the configured adjusted-p-value and absolute log2-fold-change cutoffs."}
+plot_volcano(three_condition_output, "FC_vs_Healthy")
+```
+
+#### Differentially expressed proteins
+
+```{r de-table-fc-vs-healthy}
+prepare_de_table(three_condition_output, "FC_vs_Healthy") |>
+  create_dt(paste0(params$request, "-FC-over-Healthy-DE-proteins"))
+```
+
+### LC vs Healthy
+
+```{r fig-volcano-lc-vs-healthy, fig.width=12, fig.height=10, dpi=300, out.width="100%", fig.cap="Protein-level volcano plot for LC versus Healthy. Dashed thresholds show the configured adjusted-p-value and absolute log2-fold-change cutoffs."}
+plot_volcano(three_condition_output, "LC_vs_Healthy")
+```
+
+#### Differentially expressed proteins
+
+```{r de-table-lc-vs-healthy}
+prepare_de_table(three_condition_output, "LC_vs_Healthy") |>
+  create_dt(paste0(params$request, "-LC-over-Healthy-DE-proteins"))
+```
+
+### LC vs FC
+
+```{r fig-volcano-lc-vs-fc, fig.width=12, fig.height=10, dpi=300, out.width="100%", fig.cap="Protein-level volcano plot for LC versus FC. Dashed thresholds show the configured adjusted-p-value and absolute log2-fold-change cutoffs."}
+plot_volcano(three_condition_output, "LC_vs_FC")
+```
+
+#### Differentially expressed proteins
+
+```{r de-table-lc-vs-fc}
+prepare_de_table(three_condition_output, "LC_vs_FC") |>
+  create_dt(paste0(params$request, "-LC-over-FC-DE-proteins"))
+```
+
+:::
+
+## MSstats Analysis: Infected vs Healthy
+
+This analysis tests the average infected effect from the three-condition model: `(FC + LC) / 2 - Healthy`. It reuses the processed MSstats model above instead of collapsing FC and LC before conversion.
+
+```{r infected-annotation}
+annotation |>
+  mutate(InfectionStatus = if_else(Condition == "Healthy", "Healthy", "Infected")) |>
+  count(InfectionStatus, Condition, name = "runs") |>
+  arrange(InfectionStatus, Condition) |>
+  knitr::kable(
+    caption = "Runs contributing to the Infected-versus-Healthy comparison."
+  )
+```
+
+```{r compare-infected}
+knitr::kable(
+  infected_contrast_matrix,
+  caption = "Contrast matrix for the Infected-versus-Healthy comparison."
+)
+```
+
+The infected contrast uses the same publication-quality static volcano styling
+as the three-condition comparisons.
+
+```{r fig-infected-volcano, fig.width=12, fig.height=10, dpi=300, out.width="100%", fig.cap="Protein-level volcano plot for the average infected effect, defined as (FC + LC)/2 minus Healthy."}
+plot_volcano(infected_output, "Infected_vs_Healthy")
+```
+
+### Differentially expressed proteins
+
+```{r de-table-infected-vs-healthy}
+prepare_de_table(infected_output, "Infected_vs_Healthy") |>
+  create_dt(paste0(params$request, "-Infected-over-Healthy-DE-proteins"))
+```
+
+## Gene Set Enrichment Analysis
+
+GO Biological Process GSEA follows the pathway-analysis workflow used for this
+dataset. Human UniProt accessions are mapped to Entrez IDs with `org.Hs.eg.db`,
+then ranked as `sign(log2FC) * -log10(p-value)`. Duplicate Entrez mappings retain
+the protein with the largest absolute ranking score. Enrichment uses
+Benjamini-Hochberg correction and includes gene sets containing
+`r params$gsea_min_gene_set_size` to `r params$gsea_max_gene_set_size` genes.
+Positive normalized enrichment scores indicate enrichment toward proteins with
+positive MSstats fold changes; negative scores indicate the reverse.
+
+```{r run-go-bp-gsea}
+gsea_comparison_labels <- c(
+  three_condition_contrasts$label,
+  "Infected_vs_Healthy"
+)
+
+gsea_results <- purrr::set_names(gsea_comparison_labels) |>
+  purrr::map(function(comparison_label) {
+    run_go_bp_gsea(
+      all_comparison_output,
+      comparison_label = comparison_label,
+      min_gene_set_size = params$gsea_min_gene_set_size,
+      max_gene_set_size = params$gsea_max_gene_set_size,
+      pvalue_cutoff = params$gsea_pvalue_cutoff,
+      dot_show_categories = params$gsea_dot_show_categories,
+      tree_show_categories = params$gsea_tree_show_categories,
+      tree_label_wrap = params$gsea_tree_label_wrap
+    )
+  })
+
+gsea_run_summary <- summarize_gsea_runs(gsea_results)
+gsea_run_summary_file <- write_results(gsea_run_summary, "gsea_go_bp_run_summary.csv")
+
+gsea_combined_table <- purrr::imap_dfr(gsea_results, function(result, comparison_label) {
+  result$table |>
+    mutate(Comparison = comparison_label, .before = 1)
+})
+gsea_combined_file <- write_results(gsea_combined_table, "gsea_go_bp_all_comparisons.csv")
+
+gsea_result_files <- purrr::imap_chr(gsea_results, function(result, comparison_label) {
+  write_results(
+    result$table,
+    paste0("gsea_go_bp_", tolower(comparison_label), ".csv")
+  )
+})
+
+knitr::kable(
+  gsea_run_summary,
+  caption = "GO Biological Process GSEA status and result counts by comparison."
+)
+```
+
+### GSEA Dot Plots
+
+<span id="fig-gsea-dotplots"></span>
+
+```{r fig-gsea-dotplots, results='asis', fig.width=16, fig.height=10, fig.cap="GO Biological Process GSEA dot plots for each comparison. Point size represents gene count and color represents the adjusted p-value."}
+for (comparison_label in names(gsea_results)) {
+  result <- gsea_results[[comparison_label]]
+  cat("#### ", format_comparison_label(comparison_label), "\n\n", sep = "")
+  if (!is.null(result$dotplot)) {
+    print(result$dotplot)
+  } else {
+    cat("*", result$status, "*\n\n", sep = "")
+  }
+  cat("\n\n")
+}
+```
+
+### GSEA Tree Plots
+
+<span id="fig-gsea-treeplots"></span>
+
+Tree plots group enriched GO terms by pairwise term similarity, making redundant
+or closely related biological processes easier to recognize.
+
+```{r fig-gsea-treeplots, results='asis', fig.width=18, fig.height=14, fig.cap="GO Biological Process similarity trees for each comparison; branch colors group related enriched pathways."}
+for (comparison_label in names(gsea_results)) {
+  result <- gsea_results[[comparison_label]]
+  cat("#### ", format_comparison_label(comparison_label), "\n\n", sep = "")
+  if (!is.null(result$treeplot)) {
+    print(result$treeplot)
+  } else {
+    cat("*Tree plot unavailable. ", result$status, "*\n\n", sep = "")
+  }
+  cat("\n\n")
+}
+```
+
+### GSEA Results Tables
+
+`NES` is the normalized enrichment score, `p.adjust` is the
+Benjamini-Hochberg-adjusted p-value, and `core_enrichment` lists the leading-edge
+genes driving the enrichment score.
+
+```{r gsea-results-tables, results='asis'}
+invisible(DT::datatable(NULL))
+for (comparison_label in names(gsea_results)) {
+  result <- gsea_results[[comparison_label]]
+  cat("#### ", format_comparison_label(comparison_label), "\n\n", sep = "")
+  if (nrow(result$table) > 0) {
+    table_widget <- DT::datatable(
+      result$table,
+      rownames = FALSE,
+      caption = htmltools::tags$caption(
+        style = "caption-side: top; text-align: left; font-weight: bold;",
+        paste(
+          "GO Biological Process GSEA results:",
+          format_comparison_label(comparison_label)
+        )
+      ),
+      extensions = "Buttons",
+      options = list(
+        dom = "lBfrtip",
+        buttons = list(
+          "copy",
+          "csv",
+          list(
+            extend = "excel",
+            filename = paste0(
+              params$request, "-GSEA-",
+              stringr::str_replace_all(tolower(comparison_label), "_", "-")
+            ),
+            title = paste(
+              "GO Biological Process GSEA results:",
+              format_comparison_label(comparison_label)
+            )
+          )
+        ),
+        pageLength = 10,
+        lengthMenu = list(c(10, 25, 50, -1), c("10", "25", "50", "All")),
+        scrollX = TRUE
+      )
+    ) |>
+      DT::formatSignif(
+        intersect(c("enrichmentScore", "NES", "pvalue", "p.adjust", "qvalue"), names(result$table)),
+        digits = 3
+      )
+    print(htmltools::tagList(table_widget))
+  } else {
+    cat("*", result$status, "*\n\n", sep = "")
+  }
+  cat("\n\n")
+}
+```
+
+
+## Power and Detectability
+
+Power diagnostics are calculated from the MSstats contrast estimates, standard
+errors, and degrees of freedom. The prospective-style calculation asks whether
+the current design and observed variability would have `r scales::percent(params$power_target)`
+power to detect a target effect of `r abs(params$power_effect_log2fc)` log2 fold
+change at a nominal alpha of `r params$power_alpha`. The observed-effect
+post-hoc power calculation uses the measured log2 fold change, so it should be
+read as a detectability diagnostic alongside the p-values rather than as
+independent evidence.
+
+```{r power-settings}
+tibble(
+  setting = c(
+    "Nominal alpha for power calculations",
+    "FDR threshold used for detected proteins",
+    "Target power",
+    "Target absolute log2 fold-change",
+    "Target linear fold-change"
+  ),
+  value = c(
+    params$power_alpha,
+    params$power_alpha,
+    params$power_target,
+    abs(params$power_effect_log2fc),
+    round(2^abs(params$power_effect_log2fc), 3)
+  )
+) |>
+  knitr::kable(caption = "Power-analysis settings used for all comparisons.")
+```
+
+```{r power-diagnostics}
+power_diagnostics <- add_power_metrics(
+  all_comparison_output,
+  alpha = params$power_alpha,
+  target_power = params$power_target,
+  effect_log2fc = params$power_effect_log2fc
+)
+
+power_diagnostics_file <- write_results(power_diagnostics, "msstats_power_diagnostics.csv")
+
+power_summary <- summarize_power_metrics(power_diagnostics)
+power_summary |>
+  knitr::kable(
+    digits = 2,
+    caption = "Power and minimum-detectable-effect summary by comparison."
+  )
+```
+
+```{r power-detection-status}
+power_diagnostics |>
+  count(.data$Label, .data$power_detection_status, name = "proteins") |>
+  group_by(.data$Label) |>
+  mutate(percent = 100 * .data$proteins / sum(.data$proteins)) |>
+  ungroup() |>
+  arrange(.data$Label, desc(.data$proteins)) |>
+  knitr::kable(
+    digits = 2,
+    caption = "Protein counts by power and differential-detection status."
+  )
+```
+
+```{r fig-power-target-effect, fig.width=10, fig.height=6, fig.cap="Estimated power to detect the configured target log2 fold change across proteins in each comparison."}
+power_diagnostics |>
+  filter(is.finite(.data$target_log2fc_power)) |>
+  ggplot(aes(x = .data$Label, y = .data$target_log2fc_power, fill = .data$Label)) +
+  geom_violin(trim = TRUE, alpha = 0.65, show.legend = FALSE) +
+  geom_boxplot(width = 0.18, outlier.alpha = 0.15, show.legend = FALSE) +
+  geom_hline(yintercept = params$power_target, linetype = "dashed", color = "grey25") +
+  coord_flip() +
+  scale_y_continuous(labels = scales::percent_format(accuracy = 1), limits = c(0, 1)) +
+  labs(
+    x = NULL,
+    y = paste0("Power to detect |log2FC| = ", abs(params$power_effect_log2fc)),
+    title = "Power for the target effect size by comparison"
+  ) +
+  theme_bw()
+```
+
+```{r fig-minimum-detectable-effect, fig.width=10, fig.height=6, fig.cap="Estimated minimum absolute log2 fold change required to attain the target power for each comparison."}
+power_diagnostics |>
+  filter(is.finite(.data$detectable_log2fc_at_target_power)) |>
+  ggplot(aes(x = .data$Label, y = .data$detectable_log2fc_at_target_power,
+             fill = .data$Label)) +
+  geom_violin(trim = TRUE, alpha = 0.65, show.legend = FALSE) +
+  geom_boxplot(width = 0.18, outlier.alpha = 0.15, show.legend = FALSE) +
+  geom_hline(yintercept = abs(params$power_effect_log2fc),
+             linetype = "dashed", color = "grey25") +
+  coord_flip() +
+  labs(
+    x = NULL,
+    y = paste0("Minimum |log2FC| for ", scales::percent(params$power_target), " power"),
+    title = "Estimated detectable effect size by comparison"
+  ) +
+  theme_bw()
+```
+
+```{r fig-post-hoc-power, fig.width=10, fig.height=6, fig.cap="Observed-effect power versus absolute log2 fold change, stratified by comparison and FDR detection status."}
+power_diagnostics |>
+  filter(is.finite(.data$observed_effect_power), is.finite(.data$log2FC)) |>
+  ggplot(aes(x = abs(.data$log2FC), y = .data$observed_effect_power,
+             color = .data$fdr_detected)) +
+  geom_point(alpha = 0.45, size = 1.4) +
+  geom_hline(yintercept = params$power_target, linetype = "dashed", color = "grey25") +
+  geom_vline(xintercept = abs(params$power_effect_log2fc),
+             linetype = "dotted", color = "grey35") +
+  facet_wrap(~ Label) +
+  scale_y_continuous(labels = scales::percent_format(accuracy = 1), limits = c(0, 1)) +
+  scale_color_manual(values = c("FALSE" = "grey55", "TRUE" = "#C44E52")) +
+  labs(
+    x = "Observed absolute log2 fold-change",
+    y = "Observed-effect post-hoc power",
+    color = paste0("FDR < ", params$power_alpha),
+    title = "Observed-effect power and detected proteins"
+  ) +
+  theme_bw()
+```
+
+## Model Issue Summary
+
+MSstats can annotate rows with model-fitting or comparison issues. This summary
+counts those flags by comparison so they are visible before exported result
+files are used downstream.
+
+```{r model-issue-summary}
+add_issue_status <- function(results, analysis_label) {
+  results <- as_plain_tibble(results)
+  if (!"issue" %in% names(results)) {
+    results$issue <- NA_character_
+  }
+
+  results |>
+    mutate(
+      analysis = analysis_label,
+      issue = as.character(.data$issue),
+      issue = if_else(is.na(.data$issue) | !nzchar(.data$issue),
+                      "No issue", .data$issue)
+    )
+}
+
+comparison_issue_summary <- bind_rows(
+  add_issue_status(three_condition_output, "Three-condition"),
+  add_issue_status(infected_output, "Infected vs Healthy")
+) |>
+  count(.data$analysis, .data$Label, .data$issue, name = "proteins") |>
+  arrange(.data$analysis, .data$Label, desc(.data$proteins))
+
+knitr::kable(
+  comparison_issue_summary,
+  caption = "MSstats model and comparison issue counts."
+)
+```
+
+## Conclusion
+
+```{r conclusion, results='asis'}
+render_analysis_conclusion(
+  all_comparison_output,
+  gsea_combined_table,
+  fdr_cutoff = params$volcano_p_cutoff,
+  log2fc_cutoff = params$volcano_fc_cutoff,
+  power_summary = power_summary,
+  target_power = params$power_target,
+  power_effect_log2fc = params$power_effect_log2fc
+)
+```
+
+```{=html}
+<script>
+document.addEventListener("DOMContentLoaded", function () {
+  const conclusion = document.getElementById("conclusion");
+  const methods = document.getElementById("methods");
+  if (conclusion && methods && methods.parentNode) {
+    methods.parentNode.insertBefore(conclusion, methods);
+  }
+
+  const tocLink = document.querySelector('#TOC a[href="#conclusion"]');
+  if (tocLink) {
+    const tocItem = tocLink.closest("li");
+    const tocList = tocItem ? tocItem.parentNode : null;
+    if (tocItem && tocList) tocList.insertBefore(tocItem, tocList.firstChild);
+  }
+
+  document.addEventListener("click", function (event) {
+    const link = event.target.closest('a[href^="#fig-"]');
+    if (!link) return;
+    const targetId = link.getAttribute("href").slice(1);
+    const target = document.getElementById(targetId);
+    const tabPane = target ? target.closest(".tab-pane") : null;
+    if (!target || !tabPane || tabPane.classList.contains("active")) return;
+
+    const selector =
+      '[data-bs-target="#' + tabPane.id + '"], [href="#' + tabPane.id + '"]';
+    const tabControl = document.querySelector(selector);
+    if (tabControl && window.bootstrap) {
+      event.preventDefault();
+      bootstrap.Tab.getOrCreateInstance(tabControl).show();
+      window.setTimeout(function () {
+        target.scrollIntoView({behavior: "smooth", block: "start"});
+      }, 180);
+    }
+  });
+});
+</script>
+```
+
+## Session Info
+
+```{r session-info}
+sessionInfo()
+```
